@@ -1,0 +1,248 @@
+#!/usr/bin/env es
+# vi: ft=es
+
+import error_utils
+
+errmsgs = %dict(
+	uid_not_root => 0 @{ result 'Must be run as root!' }
+	be_not_exist => 1 @ arg _ { result 'BE '^$arg^' does not exist' }
+	be_exists => 1 @ arg _ { result 'BE '^$arg^' exists' }
+	be_not_mounted => 1 @ arg _ { result 'BE '^$arg^' is not mounted' }
+	be_is_root => 1 @ arg _ { result 'BE '^$arg^' is mounted as root' }
+	be_mounted => 1 @ arg _ { result 'BE '^$arg^' is already mounted' }
+	be_cant_name => 0 @ arg _ { result 'unable to generate a new BE name' }
+	mp_not_be => 1 @ arg _ { result $arg^' is not a BE mountpoint' }
+	be_not_mounted => 1 @ arg _ { result 'BE '^$arg^' is not mounted' }
+)
+
+fn be_exists name _ {
+	if {~ <={%count ``(\n){bectl list | grep $name}} 1} {
+		result <=true
+	} {
+		result <=false
+	}
+}
+
+fn is_root {
+	if {~ `{id -u} 0} {
+		result <=true
+	} {
+		result <=false
+	}
+}
+
+fn be_get_mountpoint name _ {
+	if {! be_exists $name} {
+		err be_not_exist $name |> throw
+	}
+
+	match <={%elem 3 `{bectl list | grep $name}} (
+		('-') { err be_not_mounted $name |> throw }
+		* { return $matchexpr }
+	)
+}
+
+fn be_is_root name _ {
+	(e r) = <={try be_get_mountpoint $name}
+	rethrow? be_is_root $e
+	if {~ $r '/' } {
+		return <=true
+	}
+	return <=false
+}
+
+fn be_is_mounted name _ {
+	(e _) = <={try be_get_mountpoint $name}
+	if {$e} {
+		match <={$e msg} (
+			(<={err -m be_not_exist $name}) {
+				rethrow be_is_mounted $e
+			}
+			(<={err -m be_not_mounted $name}) {
+				return <=false
+			}
+			* { unreachable }
+		)
+	}
+	return <=true
+}
+
+fn be_mount name _ {
+	if {! is_root } {
+		err uid_not_root |> throw
+	}
+	if {be_is_mounted $name} {
+		err be_mounted $name |> throw
+	}
+
+	let(mountpoint=) {
+		bectl mount $name
+		mountpoint = <={be_get_mountpoint $name}
+		mount -t devfs devfs $mountpoint/dev
+		mount -t nullfs /tmp $mountpoint/tmp
+		if {~ <={%count `{/bin/ls $mountpoint/compat}} 0} {
+			mount -t nullfs /compat $mountpoint/compat
+		}
+	}
+}
+
+
+fn get_be_by_mountpoint mountpoint _ {
+	if {~ $mountpoint '-'} {
+		err mp_not_be $mountpoint |> throw
+	}
+	if {! %naccess -d $mountpoint} {
+		err mp_not_be $mountpoint |> throw
+	}
+	if {~ $mountpoint '/'} {
+		for (beelem = ``(\n){bectl list}) {
+			let((name _ mtpt _ _ _) = <={%split ' ' $beelem}){
+				if {~ $mtpt '/'} {
+					return $name
+				}
+			}
+		}
+		unreachable
+	}		
+	let(bedata = `{bectl list | grep $mountpoint}) {
+		if {! ~ $#bedata 6} {
+			err mp_not_be $mountpoint |> throw
+		}
+		result $bedata(1)
+	}
+}
+
+fn be_parse_mounts mountdata {
+	let (mounts = %dict()) {
+		for(mountstatement = $mountdata) {
+			let((dev _ path rest) = <={%split ' ' $mountstatement}; reststr=; fsinfo=%dict()) {
+				if {~ $dev 'map'} {
+					# special handling for map
+					let(mss = <={%split ' ' $mountstatement}) {
+						dev = $mss(1)^' '^$mss(2)
+						path = $mss(4)
+						rest = $mss(5 ...)
+					}
+				}
+				reststr = $"rest
+				reststr = <={~~ $reststr '('^*^')'}
+				rest = <={%split ',' $reststr}
+				fsinfo := type => $rest
+				fsinfo := dev => $dev
+				if {dicthaskey $mounts $path} {
+					mounts := $path => $mounts($path) $fsinfo
+				} {
+					mounts := $path => $fsinfo
+				}
+			}
+		}
+		result $mounts
+	}
+}
+
+fn get_be_mounts name _ {
+	let (mountpoint = <={be_get_mountpoint $name}) {
+		be_parse_mounts ``(\n){mount | grep -v zfs | grep $mountpoint}
+	}
+}
+
+fn be_unmount name _ {
+	if {! is_root } {
+		err uid_not_root |> throw
+	}
+	if {! be_is_mounted $name} {
+		err be_not_mounted $name |> throw
+	}
+	let (
+		mounts = <={get_be_mounts $name}
+	) {
+		if {! ~ $#mounts 0} {
+			dictforall $mounts @ point info {
+				echo >[1=2] 'beutil: unmounting '^$point
+				umount $point
+			}
+		}
+		bectl unmount $name
+		return <=true
+	}
+}
+
+fn be_gen_name version _ {
+	if {~ $#version 0} { version = false }
+	let (
+		newname = <={
+			if {$version} {
+				result `{freebsd-version}^'-'^`{date '+%Y-%m-%d'}
+			} {
+				result 'be-'^`{date '+%Y-%m-%d'}
+			}
+		}
+		i = 0
+	) {
+		if {! be_exists $newname} {
+			return $newname
+		}
+		forever {
+			if {! be_exists $newname^'_'^$i} {
+				return $newname^'_'^$i
+			}
+			i = <={add $i 1}
+		}
+		err be_cant_name |> throw
+	}
+}
+
+fn be_new name _ {
+	if {! is_root} {
+		err uid_not_root |> throw
+	}
+	if {be_exists $name} {
+		err be_exists |> throw
+	}
+	bectl create $name
+}
+
+operation = basichelp
+target = ''
+
+fn usagefn {
+	echo >[1=2] 'usage: beutil [-m be | -M be | -u be | -c | -n ]'
+	if {~ $operation fullhelp} {
+		echo >[1=2] '    -m be  -- mount a boot environment'
+		echo >[1=2] '    -M be  -- print a boot environment''s mountpoint'
+		echo >[1=2] '    -u be  -- unmount a boot environment'
+		echo >[1=2] '    -c     -- create a boot environment'
+		echo >[1=2] '    -n     -- generate a boot environment name'
+	}
+	if {~ $operation errorhelp} { exit 1 }
+	exit 0
+}
+
+fn beutil cmdargs {
+	parseargs @ arg {
+		match $arg (
+			(-u) { operation = unmount; target = $flagarg }
+			(-m) { operation = mount; target = $flagarg }
+			(-M) { operation = mountpoint; target = $flagarg }
+			(-n) { operation = name }
+			(-c) { operation = newbe }
+			(-h) { operation = fullhelp }
+			* { operation = errorhelp }
+		)
+	} $fn-usagefn $cmdargs
+
+	match $operation (
+		(*help) { usagefn }
+		(mount) { be_mount $target }
+		(mountpoint) { be_get_mountpoint $target |> echo }
+		(unmount) { be_unmount $target }
+		(name) { echo <={be_gen_name false} }
+		(newbe) { be_gen_name |> be_new }
+		* { unreachable }
+	)
+
+	exit 0
+}
+
+beutil $*
+

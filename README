@@ -1,0 +1,5 @@
+beutil -- a few utility functions for boot environments.
+
+requires es-mveety: https://github.com/mveety/es
+
+
