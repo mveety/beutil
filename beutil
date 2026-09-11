@@ -80,7 +80,7 @@ fn be_mount name _ {
 		mountpoint = <={be_get_mountpoint $name}
 		mount -t devfs devfs $mountpoint/dev
 		mount -t nullfs /tmp $mountpoint/tmp
-		if {~ <={%count `{/bin/ls $mountpoint/compat}} 0} {
+		if {! ~ <={%count `{mount | grep /compat}} 0} {
 			mount -t nullfs /compat $mountpoint/compat
 		}
 	}
